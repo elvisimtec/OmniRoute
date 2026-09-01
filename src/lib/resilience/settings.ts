@@ -18,6 +18,7 @@ import {
   normalizeQuotaShareConcurrencyLimitSettings,
   normalizeProviderCooldownSettings,
   normalizeQuotaPreflightSettings,
+  normalizeAvailabilityPolicies,
   normalizeStreamRecoverySettings,
   normalizeProviderQuotaOverrides,
 } from "./settings/normalize";
@@ -169,6 +170,10 @@ export const DEFAULT_RESILIENCE_SETTINGS: ResilienceSettings = {
   // provider registered in providerDefaultRateLimit.ts) uses its static
   // default until an operator adds an override here.
   providerQuotaOverrides: {},
+  // OMN-10: no configured availability policies by default. The built-in
+  // `deepseek-offpeak` policy lives in open-sse/services/combo/availabilitySchedule.ts
+  // and needs no entry here.
+  availabilityPolicies: [],
 };
 
 function buildLegacyFallback(settings: JsonRecord): ResilienceSettings {
@@ -265,6 +270,7 @@ function buildLegacyFallback(settings: JsonRecord): ResilienceSettings {
     quotaShareConcurrencyLimit: DEFAULT_RESILIENCE_SETTINGS.quotaShareConcurrencyLimit,
     providerCooldown: DEFAULT_RESILIENCE_SETTINGS.providerCooldown,
     quotaPreflight: DEFAULT_RESILIENCE_SETTINGS.quotaPreflight,
+    availabilityPolicies: DEFAULT_RESILIENCE_SETTINGS.availabilityPolicies,
     streamRecovery: streamRecoveryDefaults,
     providerQuotaOverrides: DEFAULT_RESILIENCE_SETTINGS.providerQuotaOverrides,
   };
@@ -342,6 +348,10 @@ export function resolveResilienceSettings(
       current.quotaPreflight,
       fallback.quotaPreflight
     ),
+    availabilityPolicies: normalizeAvailabilityPolicies(
+      current.availabilityPolicies,
+      fallback.availabilityPolicies
+    ),
     streamRecovery: normalizeStreamRecoverySettings(
       current.streamRecovery,
       fallback.streamRecovery
@@ -396,6 +406,10 @@ export function mergeResilienceSettings(
       current.providerCooldown
     ),
     quotaPreflight: normalizeQuotaPreflightSettings(updates.quotaPreflight, current.quotaPreflight),
+    availabilityPolicies: normalizeAvailabilityPolicies(
+      updates.availabilityPolicies,
+      current.availabilityPolicies
+    ),
     streamRecovery: normalizeStreamRecoverySettings(updates.streamRecovery, current.streamRecovery),
     providerQuotaOverrides: normalizeProviderQuotaOverrides(
       updates.providerQuotaOverrides,

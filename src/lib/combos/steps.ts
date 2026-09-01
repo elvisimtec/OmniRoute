@@ -9,6 +9,22 @@ type JsonRecord = Record<string, unknown>;
 
 export const COMBO_SCHEMA_VERSION = 2;
 
+/**
+ * OMN-10: per-step eligibility restrictions, evaluated BEFORE dispatch on top
+ * of the existing availability stack. Eligibility only ever NARROWS
+ * availability — it can never re-activate a target the rest of the system
+ * marked unavailable (disabled connection, cooldown, circuit breaker, quota).
+ * A step without `eligibility` is unrestricted (backward-compatible).
+ */
+export interface ComboStepEligibility {
+  /** Named time-window policy (resilience settings) or built-in id (e.g. "deepseek-offpeak"). */
+  availabilityPolicy?: string;
+  /** Hard minimum-remaining quota reserve in percent; skip when a relevant window is <= this. */
+  minRemainingQuotaPercent?: number;
+  /** Restrict the quota check to these windows (e.g. ["session", "weekly"]); missing data ignored. */
+  quotaWindows?: string[];
+}
+
 export interface ComboModelStep {
   id: string;
   kind: "model";
@@ -26,6 +42,7 @@ export interface ComboModelStep {
   prompt?: string | null;
   tags?: string[];
   fallbackOnlyOnQuotaExhaustion?: boolean;
+  eligibility?: ComboStepEligibility;
 }
 
 export interface ComboRefStep {
@@ -85,6 +102,42 @@ function toWeight(value: unknown): number {
 
   if (!Number.isFinite(parsed)) return 0;
   return Math.max(0, Math.min(100, parsed));
+}
+
+/**
+ * OMN-10: sanitize a raw `eligibility` value off the wire into the typed shape.
+ * Unknown keys are dropped (strict allowlist), malformed values fall back to
+ * "no restriction of that kind", and a value with no usable restrictions
+ * normalizes to undefined (step behaves as unrestricted).
+ */
+export function sanitizeComboStepEligibility(
+  value: unknown
+): ComboStepEligibility | undefined {
+  if (!isRecord(value)) return undefined;
+  const availabilityPolicy = toTrimmedString(value.availabilityPolicy);
+  const minRaw =
+    typeof value.minRemainingQuotaPercent === "number"
+      ? value.minRemainingQuotaPercent
+      : typeof value.minRemainingQuotaPercent === "string" && value.minRemainingQuotaPercent.trim() !== ""
+        ? Number(value.minRemainingQuotaPercent)
+        : Number.NaN;
+  // Clamp into range rather than drop: an out-of-range reserve must never
+  // silently REMOVE the restriction (clamping toward the stricter end).
+  const minRemainingQuotaPercent =
+    Number.isFinite(minRaw) && minRaw >= 0 ? Math.min(100, minRaw) : undefined;
+  const quotaWindows = Array.isArray(value.quotaWindows)
+    ? value.quotaWindows
+        .map((window) => toTrimmedString(window))
+        .filter((window): window is string => !!window)
+        .slice(0, 10)
+    : undefined;
+  const result: ComboStepEligibility = {};
+  if (availabilityPolicy) result.availabilityPolicy = availabilityPolicy.slice(0, 100);
+  if (minRemainingQuotaPercent !== undefined) {
+    result.minRemainingQuotaPercent = minRemainingQuotaPercent;
+  }
+  if (quotaWindows && quotaWindows.length > 0) result.quotaWindows = quotaWindows;
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function collectComboNames(allCombos: ComboCollectionLike): Set<string> {
@@ -399,6 +452,7 @@ export function normalizeComboStep(
         .map((connId) => toTrimmedString(connId))
         .filter((connId): connId is string => !!connId)
     : undefined;
+  const eligibility = sanitizeComboStepEligibility(value.eligibility);
 
   return {
     id:
@@ -414,6 +468,7 @@ export function normalizeComboStep(
     ...(tags && tags.length > 0 ? { tags } : {}),
     ...(allowedConnectionIds && allowedConnectionIds.length > 0 ? { allowedConnectionIds } : {}),
     ...(fallbackOnlyOnQuotaExhaustion ? { fallbackOnlyOnQuotaExhaustion: true } : {}),
+    ...(eligibility ? { eligibility } : {}),
   };
 }
 

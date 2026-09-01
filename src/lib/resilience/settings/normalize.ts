@@ -19,6 +19,8 @@ import type {
   QuotaShareConcurrencyLimitSettings,
   ProviderCooldownSettings,
   QuotaPreflightSettings,
+  AvailabilityPolicySettings,
+  AvailabilityPolicyWindowSettings,
   StreamRecoverySettings,
   ProviderQuotaOverrideSettings,
 } from "./types";
@@ -275,6 +277,57 @@ export function normalizeProviderWindowDefaults(
     }
   }
   return out;
+}
+
+/** OMN-10: "HH:MM" 24h clock ("24:00" allowed as an exclusive end-of-day end). */
+const AVAILABILITY_CLOCK_RE = /^([01]\d|2[0-4]):[0-5]\d$/;
+
+function normalizeAvailabilityWindow(value: unknown): AvailabilityPolicyWindowSettings | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const start = typeof record.start === "string" ? record.start.trim() : "";
+  const end = typeof record.end === "string" ? record.end.trim() : "";
+  if (!AVAILABILITY_CLOCK_RE.test(start) || !AVAILABILITY_CLOCK_RE.test(end)) return null;
+  const days = Array.isArray(record.days)
+    ? [
+        ...new Set(
+          record.days
+            .map((day) => (typeof day === "number" ? Math.trunc(day) : Number.NaN))
+            .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+        ),
+      ]
+    : [];
+  return {
+    ...(days.length > 0 ? { days } : {}),
+    start,
+    end,
+  };
+}
+
+export function normalizeAvailabilityPolicies(
+  next: unknown,
+  fallback: AvailabilityPolicySettings[]
+): AvailabilityPolicySettings[] {
+  const rawList = Array.isArray(next) ? next : fallback;
+  const out = new Map<string, AvailabilityPolicySettings>();
+  for (const entry of rawList) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as JsonRecord;
+    const id = typeof record.id === "string" ? record.id.trim().slice(0, 100) : "";
+    if (!id) continue;
+    const timezone =
+      typeof record.timezone === "string" && record.timezone.trim() !== ""
+        ? record.timezone.trim().slice(0, 64)
+        : undefined;
+    const windows = Array.isArray(record.windows)
+      ? record.windows
+          .map(normalizeAvailabilityWindow)
+          .filter((window): window is AvailabilityPolicyWindowSettings => window !== null)
+      : [];
+    if (windows.length === 0) continue;
+    out.set(id, { id, ...(timezone ? { timezone } : {}), windows });
+  }
+  return [...out.values()];
 }
 
 export function normalizeQuotaPreflightSettings(

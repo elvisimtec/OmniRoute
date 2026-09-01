@@ -37,7 +37,12 @@ function asThresholdMap(value: unknown): Record<string, number> {
   return result;
 }
 
-function quotaWindowLookupNames(provider: string, windowName: string): string[] {
+/**
+ * OMN-10: exported for the combo-step eligibility evaluator
+ * (stepEligibility.ts) so both paths resolve Codex-style window aliases
+ * ("5h"→"session", "7d"→"weekly") identically.
+ */
+export function quotaWindowLookupNames(provider: string, windowName: string): string[] {
   const names = [windowName];
   const lower = windowName.toLowerCase();
   if (lower !== windowName) names.push(lower);

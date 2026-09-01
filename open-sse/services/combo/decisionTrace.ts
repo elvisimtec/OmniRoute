@@ -29,6 +29,12 @@ export const COMBO_SKIP_REASONS = [
   "concurrency_cap",
   "admission_lane",
   "predictive_ttft",
+  // OMN-10: combo-step eligibility filter (stepEligibility.ts) — schedule
+  // windows (peak_period), hard quota reserves (quota_reserve) and
+  // unresolvable policy references (eligibility_policy, fail-closed).
+  "peak_period",
+  "quota_reserve",
+  "eligibility_policy",
 ] as const;
 
 export type ComboSkipReason = (typeof COMBO_SKIP_REASONS)[number];

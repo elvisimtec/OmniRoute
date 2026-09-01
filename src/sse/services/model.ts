@@ -18,6 +18,7 @@ import {
   stripContextWindowSuffix,
 } from "@omniroute/open-sse/services/model.ts";
 import { getLearnedReasoningEffortForModel } from "@omniroute/open-sse/services/learnedReasoningEffortCaps.ts";
+import { splitComboEffortSuffix } from "@/lib/combos/effortAlias";
 import { REGISTRY } from "@omniroute/open-sse/config/providerRegistry.ts";
 import { getRegisteredProviderEffortBaseModelId } from "@omniroute/open-sse/utils/registeredEffortVariants.ts";
 import { getReservedProviderPrefixes } from "@/shared/constants/reservedProviderPrefixes";
@@ -574,6 +575,17 @@ export async function getComboForModel(modelStr) {
   const baseModelStr = stripContextWindowSuffix(modelStr);
   if (baseModelStr && baseModelStr !== modelStr) {
     combo = await getCombo(baseModelStr);
+    if (combo) return combo;
+  }
+
+  // OMN-10: effort-variant alias — "<combo>-low|-medium|-high" resolves to the
+  // SAME combo with the effort injected before dispatch (chat.ts). Exact-name
+  // lookups above always win, so a literal combo actually named "X-low" is
+  // never shadowed. Routing (targets, order, eligibility) is identical for
+  // every effort variant — only the reasoning payload differs.
+  const effortSplit = splitComboEffortSuffix(baseModelStr || modelStr);
+  if (effortSplit && effortSplit.base) {
+    combo = await getCombo(effortSplit.base);
     if (combo) return combo;
   }
 

@@ -280,6 +280,7 @@ import {
   buildAutoQuotaThresholds,
   resolveQuotaExhaustionCutoffForTarget,
 } from "./combo/quotaExhaustionCutoff.ts";
+import { resolveStepEligibilitySkipForTarget } from "./combo/stepEligibility.ts";
 import { expandTargetsByFingerprints } from "./combo/fingerprintExpansion.ts";
 import { resolveComboTargetPipeline } from "./combo/targetResolution.ts";
 import {
@@ -1076,6 +1077,10 @@ async function handleComboChatInner({
       const exhaustedProviders = new Set<string>();
       const exhaustedConnections = new Set<string>();
       const transientRateLimitedProviders = new Set<string>();
+      // OMN-10: executionKey -> eligibility skip detail, surfaced through
+      // buildComboDiag so an all-targets-skipped terminal names the policy
+      // reason per step (secret-free: policy ids, window names, percentages).
+      const eligibilitySkips = new Map<string, string>();
       if (setTry > 0) {
         log.info("COMBO", `All targets failed — retrying set (${setTry}/${maxSetRetries})`);
         await new Promise((resolve) => {
@@ -1115,6 +1120,10 @@ async function handleComboChatInner({
         excluded: [
           ...[...exhaustedProviders].map((p) => ({ provider: p, reason: "exhausted" })),
           ...[...exhaustedConnections].map((c) => formatExhaustedConnectionKey(String(c))),
+          ...[...eligibilitySkips.entries()].map(([step, detail]) => ({
+            provider: step,
+            reason: `eligibility:${detail}`,
+          })),
         ],
         attemptOrder: comboAttemptOrder,
         terminalReason,
@@ -1284,6 +1293,42 @@ async function handleComboChatInner({
           });
           if (i > 0) fallbackCount++;
           return stopProtectedPriorityTarget(`Model ${modelStr} is locked`);
+        }
+
+        // OMN-10: per-step combo eligibility (availability windows / quota
+        // reserve). Runs AFTER the built-in availability gates so it can only
+        // ever NARROW the candidate set — a manually disabled connection, an
+        // active cooldown or an open breaker already skipped the target above
+        // and eligibility cannot resurrect it. A skip here is a plain "try
+        // the next priority target": no administrative state is written, and
+        // even a `fallbackOnlyOnQuotaExhaustion` protected target does NOT
+        // abort the chain (a policy skip is not quota exhaustion). The
+        // existing quota-exhaustion cutoff below remains authoritative for
+        // its own semantics; this check adds the per-STEP reserve on top.
+        if (target.eligibility && strategy !== "auto") {
+          const eligibilitySkip = await resolveStepEligibilitySkipForTarget({
+            provider,
+            connectionId: target.connectionId,
+            eligibility: target.eligibility,
+            resilienceSettings,
+            resetWindowConfig: quotaCutoffResetWindowConfig,
+            comboName: combo.name,
+            log,
+          });
+          if (eligibilitySkip.skipped) {
+            const reason = eligibilitySkip.reason || "eligibility_policy";
+            const detail = eligibilitySkip.detail || reason;
+            log.info("COMBO", `Skipping ${modelStr} — eligibility: ${detail}`);
+            eligibilitySkips.set(target.executionKey, detail);
+            recordComboDecision(traceInvocationId, {
+              step: target.executionKey,
+              target: modelStr,
+              decision: "skipped_before_dispatch",
+              reason,
+            });
+            if (i > 0) fallbackCount++;
+            return null;
+          }
         }
 
         // #5923 (Finding #4) — honor the same opt-in quota-exhaustion cutoff the
@@ -3229,6 +3274,29 @@ async function handleRoundRobinCombo({
         log.info("COMBO-RR", exhaustedSkip);
         if (offset > 0) fallbackCount++;
         continue;
+      }
+
+      // OMN-10: per-step combo eligibility — same narrowing semantics as the
+      // speculative dispatcher's executeTarget check (never re-activates a
+      // target the gates above already skipped; no administrative writes).
+      if (target.eligibility) {
+        const eligibilitySkip = await resolveStepEligibilitySkipForTarget({
+          provider,
+          connectionId: target.connectionId,
+          eligibility: target.eligibility,
+          resilienceSettings,
+          resetWindowConfig: resolveResetWindowConfig(config as Record<string, unknown>),
+          comboName: combo.name,
+          log,
+        });
+        if (eligibilitySkip.skipped) {
+          log.info(
+            "COMBO-RR",
+            `Skipping ${modelStr} — eligibility: ${eligibilitySkip.detail || eligibilitySkip.reason}`
+          );
+          if (offset > 0) fallbackCount++;
+          continue;
+        }
       }
 
       // #9654 Wave 2: per-target lane-aware admission probe (see executeTarget

@@ -144,6 +144,9 @@ function normalizeRuntimeStep(
     ...(step.kind === "model" && step.fallbackOnlyOnQuotaExhaustion
       ? { fallbackOnlyOnQuotaExhaustion: true }
       : {}),
+    // OMN-10: per-step eligibility restrictions (already sanitized by
+    // normalizeComboStep) — evaluated before dispatch in stepEligibility.ts.
+    ...(step.kind === "model" && step.eligibility ? { eligibility: step.eligibility } : {}),
   } satisfies ResolvedComboTarget;
 }
 

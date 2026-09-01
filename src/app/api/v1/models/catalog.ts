@@ -1,3 +1,4 @@
+import { COMBO_EFFORT_VARIANT_IDS } from "@/lib/combos/effortAlias";
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
 import { NOAUTH_PROVIDERS } from "@/shared/constants/providers";
 import {
@@ -913,6 +914,29 @@ async function buildUnifiedModelsResponseCore(
         parent: null,
         ...comboMetadata,
       });
+
+      // OMN-10: effort-variant entries — combos that opted in via
+      // config.effortVariants expose <name>-low/-medium/-high in the catalog.
+      // All variants route through the SAME combo (chat.ts injects the effort
+      // after resolution), so no configuration is duplicated.
+      const comboConfig = (combo as { config?: Record<string, unknown> | null }).config;
+      if (comboConfig?.effortVariants === true) {
+        for (const effort of COMBO_EFFORT_VARIANT_IDS) {
+          const variantId = `${combo.name}-${effort}`;
+          if (listedIds.has(variantId)) continue;
+          listedIds.add(variantId);
+          models.push({
+            id: variantId,
+            object: "model",
+            created: timestamp,
+            owned_by: "combo",
+            permission: [],
+            root: combo.name,
+            parent: null,
+            ...comboMetadata,
+          });
+        }
+      }
 
       // #9147: combos can number hundreds at catalog scale — yield periodically.
       await maybeYieldCatalogBuild();

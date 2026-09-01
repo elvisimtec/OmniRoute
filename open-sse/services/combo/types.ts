@@ -9,6 +9,7 @@
 import type { CompressionExclusions } from "../compression/exclusions.ts";
 import type { ProviderCandidate } from "../autoCombo/scoring.ts";
 import type { PerTargetAdmissionHook } from "../admission/types.ts";
+import type { ComboStepEligibility } from "../../../src/lib/combos/steps.ts";
 
 export const RESET_WINDOW_NAMES = ["weekly", "session", "monthly"] as const;
 
@@ -202,6 +203,12 @@ export type ResolvedComboTarget = {
   prompt?: string | null;
   failoverBeforeRetry?: unknown;
   fallbackOnlyOnQuotaExhaustion?: boolean;
+  /**
+   * OMN-10: per-step eligibility restrictions evaluated before dispatch
+   * (open-sse/services/combo/stepEligibility.ts). Only ever narrows
+   * availability; absent = unrestricted.
+   */
+  eligibility?: ComboStepEligibility;
   trafficType?: "production" | "shadow";
   /**
    * Fingerprint-based account pin resolved from a combo builder composite

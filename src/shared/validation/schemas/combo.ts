@@ -16,11 +16,34 @@ import { MAX_TIMER_TIMEOUT_MS } from "@/shared/utils/runtimeTimeouts";
 
 // ──── Combo Schemas ────
 
+// OMN-10: per-step eligibility restrictions evaluated BEFORE dispatch, on top
+// of the existing availability stack (active connection, health, cooldowns,
+// quota preflight). A step WITHOUT `eligibility` is unrestricted — fully
+// backward-compatible. Eligibility can only ever NARROW availability; it can
+// never re-activate a target the existing system marked unavailable.
+export const comboStepEligibilitySchema = z
+  .object({
+    // Reference to a named time-window availability policy (resilience
+    // settings `availabilityPolicies`, e.g. "zai-offpeak") or the built-in
+    // "deepseek-offpeak". Unresolvable ids are fail-closed (target skipped).
+    availabilityPolicy: z.string().trim().min(1).max(100).optional(),
+    // Hard minimum-remaining quota reserve, percent 0-100. The target is
+    // skipped when a relevant window's remaining quota is <= this value
+    // (e.g. 20 = Codex 20% reserve). Uses the existing quota fetcher/cache.
+    minRemainingQuotaPercent: z.coerce.number().min(0).max(100).optional(),
+    // Restrict the quota check to specific windows (e.g. ["session",
+    // "weekly"] for Codex). Windows without runtime data are ignored, not
+    // failed. Omit to check every window the provider exposes.
+    quotaWindows: z.array(z.string().trim().min(1).max(64)).max(10).optional(),
+  })
+  .strict();
+
 export const comboStepMetaSchema = {
   id: z.string().trim().min(1).max(200).optional(),
   weight: z.number().min(0).max(100).optional().default(0),
   label: z.string().trim().min(1).max(200).optional(),
   fallbackOnlyOnQuotaExhaustion: z.boolean().optional(),
+  eligibility: comboStepEligibilitySchema.optional(),
 };
 
 export const comboModelStepInputSchema = z.object({
@@ -226,6 +249,14 @@ export const comboRuntimeConfigSchema = z
     resetWindowQuotaCacheMaxStaleMs: z.coerce.number().int().min(0).max(3_600_000).optional(),
     shadowRouting: shadowRoutingSchema.optional(),
     evalRouting: evalRoutingSchema.optional(),
+    // OMN-10: canonical reasoning effort (low|medium|high per the Coding-combo
+    // spec; none|xhigh accepted as the standard vocabulary) injected as
+    // `reasoning_effort` when the client request carries NO reasoning field of
+    // any shape. An explicit client value always wins.
+    defaultReasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh"]).optional(),
+    // OMN-10: expose <name>-low/-medium/-high effort-variant ids in the model
+    // catalog for this combo (requests resolve back to the combo + effort).
+    effortVariants: z.boolean().optional(),
     // Fusion strategy (open-sse/services/fusion.ts): the panel is the combo's
     // targets; `judgeModel` synthesizes the final answer (defaults to the first
     // panel model when unset); `fusionTuning` controls quorum-grace collection.

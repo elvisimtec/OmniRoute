@@ -171,6 +171,36 @@ export interface ProviderQuotaOverrideSettings {
   concurrency?: number;
 }
 
+/**
+ * OMN-10: named time-window availability policy, referenced by combo steps via
+ * `eligibility.availabilityPolicy` (e.g. `"zai-offpeak"` for the Z.ai Coding
+ * Plan off-peak hours). Windows are interpreted in the policy timezone (IANA
+ * name, default UTC); a step whose policy reference cannot be resolved is
+ * INELIGIBLE (fail-closed), so an operator must configure real hours before
+ * the target participates in routing. The deterministic `deepseek-offpeak`
+ * policy is built in and does not need an entry here.
+ */
+export interface AvailabilityPolicyWindowSettings {
+  /**
+   * Weekdays the window applies to, 0=Sunday..6=Saturday (in the policy
+   * timezone). Omit for an every-day window.
+   */
+  days?: number[];
+  /** Inclusive window start, "HH:MM" in the policy timezone ("24:00" not allowed here). */
+  start: string;
+  /** Exclusive window end, "HH:MM" in the policy timezone; "24:00" means end-of-day. */
+  end: string;
+}
+
+export interface AvailabilityPolicySettings {
+  /** Policy id referenced by combo steps (`eligibility.availabilityPolicy`). */
+  id: string;
+  /** IANA timezone name (e.g. "Asia/Shanghai"). Default "UTC". */
+  timezone?: string;
+  /** Off-peak/availability windows; the policy matches when ANY window matches. */
+  windows: AvailabilityPolicyWindowSettings[];
+}
+
 export interface StreamRecoverySettings {
   /**
    * Opt-in transparent recovery of truncated upstream streams (free-claude-code port).
@@ -215,6 +245,14 @@ export interface ResilienceSettings {
   quotaShareConcurrencyLimit: QuotaShareConcurrencyLimitSettings;
   providerCooldown: ProviderCooldownSettings;
   quotaPreflight: QuotaPreflightSettings;
+  /**
+   * OMN-10: named time-window availability policies referenced by combo steps
+   * (`eligibility.availabilityPolicy`). Empty by default — the built-in
+   * `deepseek-offpeak` policy needs no entry; anything else (e.g.
+   * `zai-offpeak`) must be configured here or referencing steps stay
+   * ineligible (fail-closed).
+   */
+  availabilityPolicies: AvailabilityPolicySettings[];
   streamRecovery: StreamRecoverySettings;
   providerQuotaOverrides: Record<string, ProviderQuotaOverrideSettings>;
 }
@@ -228,6 +266,7 @@ export interface ResilienceSettingsPatch {
   quotaShareConcurrencyLimit?: Partial<QuotaShareConcurrencyLimitSettings>;
   providerCooldown?: Partial<ProviderCooldownSettings>;
   quotaPreflight?: Partial<QuotaPreflightSettings>;
+  availabilityPolicies?: AvailabilityPolicySettings[];
   streamRecovery?: Partial<StreamRecoverySettings>;
   providerQuotaOverrides?: Record<string, Partial<ProviderQuotaOverrideSettings>>;
 }

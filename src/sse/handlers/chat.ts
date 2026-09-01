@@ -32,6 +32,7 @@ import { getImageModelEntry } from "@omniroute/open-sse/config/imageRegistry.ts"
 import { acceptHeaderForcesStream } from "@omniroute/open-sse/utils/aiSdkCompat.ts";
 import { applyNoThinkingAlias } from "@omniroute/open-sse/utils/noThinkingAlias.ts";
 import { resolveCcDiscoveryAliasStrip } from "@/lib/ccDiscoveryAliasResolve";
+import { resolveComboEffortInjection } from "@/lib/combos/effortAlias";
 import {
   handleComboChat,
   resolveComboTargets,
@@ -909,6 +910,24 @@ async function handleChatImplementation(
       "CHAT",
       `Combo "${modelStr}" [${combo.strategy || "priority"}] with ${combo.models.length} models`
     );
+
+    // OMN-10: combo-level reasoning effort — `<combo>-low|-medium|-high`
+    // aliases and the per-combo `config.defaultReasoningEffort` default
+    // (medium for the Coding combo). Explicit client reasoning fields always
+    // win; nothing is injected when the combo declares neither. Applied AFTER
+    // intent freezing + rule matching, so routing and eligibility are
+    // unaffected — the selected provider's translation layer maps the effort
+    // to its native payload (zcode's app-server transport ignores it by
+    // design, a documented no-op).
+    const comboEffort = resolveComboEffortInjection({
+      combo,
+      requestModelStr: resolvedModelStr,
+      body,
+    });
+    if (comboEffort) {
+      body = { ...body, reasoning_effort: comboEffort };
+      log.info("CHAT", `Reasoning effort "${comboEffort}" applied via combo "${combo.name}"`);
+    }
 
     // Pre-check function used by combo routing. For explicit combo live tests,
     // avoid pre-skipping so each model gets a real execution attempt.
