@@ -63,8 +63,76 @@ function getKeepLatestImagesOverride(): number | null {
 const DEFAULT_KEEP_LATEST_IMAGES = 2;
 const IMAGE_REMOVED_PLACEHOLDER = "[Earlier image removed to fit context window]";
 
-// Rough chars-per-token ratio for quick estimation
+// Rough chars-per-token ratio for quick estimation (legacy meter)
 const CHARS_PER_TOKEN = 4;
+
+// Conservative chars-per-token ratio for the calibrated meter. Measured on
+// real tool-heavy Claude/generic agent traffic: chars/4 undercounts the
+// billed upstream token count by 1.44–1.80x (incident: 705,593 estimated vs
+// 1,148,575 actual, factor 1.628). 1/2.5 = 1.6x sits mid-band and stays
+// deliberately conservative for escaped-JSON/tool payloads.
+const CALIBRATED_CHARS_PER_TOKEN = 2.5;
+
+// Final safety gate: after every compression layer, a request whose
+// estimated input exceeds this ratio of the model context limit is rejected
+// instead of forwarded upstream (#OMN-18).
+const FINAL_CONTEXT_GATE_RATIO = 0.9;
+
+export type ContextMeterMode = "legacy" | "calibrated";
+
+export interface ContextMeterContext {
+  provider?: string | null;
+  model?: string | null;
+}
+
+let cachedMeterMode: ContextMeterMode | null = null;
+
+/**
+ * Resolve the context meter mode from CONTEXT_METER_MODE=legacy|calibrated.
+ * Default: calibrated (conservative meter). "legacy" restores the pre-fix
+ * chars/4 behavior everywhere — the rollback path.
+ */
+export function resolveContextMeterMode(): ContextMeterMode {
+  if (cachedMeterMode === null) {
+    const raw = (process.env.CONTEXT_METER_MODE ?? "").trim().toLowerCase();
+    cachedMeterMode = raw === "legacy" ? "legacy" : "calibrated";
+  }
+  return cachedMeterMode;
+}
+
+/** Test hook: reset the cached mode when tests mutate the env. */
+export function __resetContextMeterModeCache(): void {
+  cachedMeterMode = null;
+}
+
+function isCodexMeterContext(context: ContextMeterContext): boolean {
+  const provider =
+    typeof context.provider === "string" ? context.provider.trim().toLowerCase() : "";
+  const model = typeof context.model === "string" ? context.model.trim().toLowerCase() : "";
+  return (
+    provider === "codex" ||
+    provider === "cx" ||
+    model.startsWith("codex/") ||
+    model.startsWith("cx/") ||
+    model.includes("codex")
+  );
+}
+
+/**
+ * Chars-per-token divisor used by estimateTokens. In calibrated mode the
+ * Codex family keeps the legacy ratio: its request path already carries an
+ * exact o200k tokenizer downstream, so inflating its heuristic would
+ * double-count and over-compress Codex traffic.
+ */
+export function charsPerTokenFor(context?: ContextMeterContext): number {
+  if (resolveContextMeterMode() === "legacy") return CHARS_PER_TOKEN;
+  if (context && isCodexMeterContext(context)) return CHARS_PER_TOKEN;
+  return CALIBRATED_CHARS_PER_TOKEN;
+}
+
+export function finalContextGateLimit(contextLimit: number): number {
+  return Math.floor(contextLimit * FINAL_CONTEXT_GATE_RATIO);
+}
 
 // Bounded per-image token budget used in place of measuring the raw base64
 // payload as text. In line with the owner's PoC (~1052 total for prompt +
@@ -254,16 +322,20 @@ function extractImageTokens(node: unknown, seen: Set<unknown>): { node: unknown;
  * budget instead of measuring its base64 payload as raw text, then the
  * remainder of the structure is measured normally via the char/4 heuristic.
  */
-export function estimateTokens(text: string | object | null | undefined): number {
+export function estimateTokens(
+  text: string | object | null | undefined,
+  meterContext?: ContextMeterContext
+): number {
   if (!text) return 0;
+  const charsPerToken = charsPerTokenFor(meterContext);
   if (typeof text === "string") {
-    return Math.ceil(text.length / CHARS_PER_TOKEN);
+    return Math.ceil(text.length / charsPerToken);
   }
   const { node, tokens: imageTokens } = extractImageTokens(text, new Set());
   // #7847: count the serialized length instead of building the string. Only `.length` was ever
   // used, and on a multi-megabyte agent body that string is a pure transient allocation.
   // jsonLength is exact (property-tested against JSON.stringify), so the estimate is unchanged.
-  return Math.ceil(jsonLength(node) / CHARS_PER_TOKEN) + imageTokens;
+  return Math.ceil(jsonLength(node) / charsPerToken) + imageTokens;
 }
 
 /**
@@ -413,6 +485,10 @@ export function compressContext(
   }
 
   const provider = options.provider || "default";
+  const meterContext: ContextMeterContext = {
+    provider: options.provider ?? null,
+    model: options.model ?? null,
+  };
   const maxTokens =
     options.maxTokens || getTokenLimit(provider, (body.model as string) || options.model || null);
   const defaultReserveTokens = Math.min(16000, Math.max(256, Math.floor(maxTokens * 0.15)));
@@ -427,7 +503,7 @@ export function compressContext(
   // inline base64 image blocks (#8368) and substitutes a bounded per-image estimate.
   // JSON.stringify()-ing first forces the char/4 text path and mis-measures a ~500KB
   // image as ~125k tokens, triggering needless compression / context loss.
-  let currentTokens = estimateTokens(messages);
+  let currentTokens = estimateTokens(messages, meterContext);
   const stats = { original: currentTokens, layers: [] as { name: string; tokens: number }[] };
 
   // Already fits
@@ -437,7 +513,7 @@ export function compressContext(
 
   // Layer 1: Trim tool_result/tool messages
   messages = trimToolMessages(messages, 2000); // Max 2000 chars per tool result
-  currentTokens = estimateTokens(messages); // #8594: object-path keeps the #8368 image estimate
+  currentTokens = estimateTokens(messages, meterContext); // #8594: object-path keeps the #8368 image estimate
   stats.layers.push({ name: "trim_tools", tokens: currentTokens });
 
   if (currentTokens <= targetTokens) {
@@ -455,7 +531,7 @@ export function compressContext(
   });
   if (imagePrune.pruned > 0) {
     messages = imagePrune.messages;
-    currentTokens = estimateTokens(messages);
+    currentTokens = estimateTokens(messages, meterContext);
     stats.layers.push({ name: "prune_images", tokens: currentTokens });
     if (currentTokens <= targetTokens) {
       return {
@@ -468,7 +544,7 @@ export function compressContext(
 
   // Layer 2: Compress structured thinking blocks (remove from non-last assistant messages)
   messages = compressThinking(messages);
-  currentTokens = estimateTokens(messages); // #8594: object-path keeps the #8368 image estimate
+  currentTokens = estimateTokens(messages, meterContext); // #8594: object-path keeps the #8368 image estimate
   stats.layers.push({ name: "compress_thinking", tokens: currentTokens });
 
   if (currentTokens <= targetTokens) {
@@ -480,8 +556,8 @@ export function compressContext(
   }
 
   // Layer 3: Aggressive purification — drop oldest messages keeping system + last N pairs
-  messages = purifyHistory(messages, targetTokens);
-  currentTokens = estimateTokens(messages); // #8594: object-path keeps the #8368 image estimate
+  messages = purifyHistory(messages, targetTokens, meterContext);
+  currentTokens = estimateTokens(messages, meterContext); // #8594: object-path keeps the #8368 image estimate
   stats.layers.push({ name: "purify_history", tokens: currentTokens });
 
   return {
@@ -552,7 +628,11 @@ function compressThinking(messages: Record<string, unknown>[]) {
 
 // ─── Layer 3: Aggressive Purification ───────────────────────────────────────
 
-function purifyHistory(messages: Record<string, unknown>[], targetTokens: number) {
+function purifyHistory(
+  messages: Record<string, unknown>[],
+  targetTokens: number,
+  meterContext?: ContextMeterContext
+) {
   // Keep system message(s) and the last N message pairs
   const system = messages.filter((m) => m.role === "system" || m.role === "developer");
   const nonSystem = messages.filter((m) => m.role !== "system" && m.role !== "developer");
@@ -569,7 +649,7 @@ function purifyHistory(messages: Record<string, unknown>[], targetTokens: number
     candidate = stripTrailingAssistantOrphanToolUse(candidate);
     // #8594: measure the candidate structure directly so image-bearing turns are not
     // over-counted and pruned during the binary search.
-    const tokens = estimateTokens(candidate);
+    const tokens = estimateTokens(candidate, meterContext);
     if (tokens <= targetTokens) break;
     keep = Math.max(2, Math.floor(keep * 0.7)); // Drop 30% each iteration
   }

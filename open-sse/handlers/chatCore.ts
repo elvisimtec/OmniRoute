@@ -317,6 +317,8 @@ import {
   getTokenLimit,
   getComboTargetTokenLimit,
   resolveComboContextLimit,
+  finalContextGateLimit,
+  type ContextMeterContext,
 } from "../services/contextManager.ts";
 import { resolveBackgroundTaskRedirect } from "./chatCore/backgroundRedirect.ts";
 import type {
@@ -1097,7 +1099,7 @@ export async function handleChatCore({
   // discarded because it only existed inside this `if` block).
   let contextLimit = getTokenLimit(provider, effectiveModel);
   if (body && Array.isArray(allMessages) && allMessages.length > 0) {
-    let estimatedTokens = estimateTokens(allMessages);
+    let estimatedTokens = estimateTokens(allMessages, { provider, model: effectiveModel });
     const compressionSettingsResult = await resolveCompressionSettings(log);
     const compressionSettings: CompressionConfig | null = compressionSettingsResult.settings;
     // #8034 — operator-named model/endpoint exclusions bypass the whole pipeline, exactly
@@ -1373,7 +1375,10 @@ export async function handleChatCore({
               cavemanOutputModeApplied = true;
               cavemanOutputModeIntensity =
                 outputStyleResult.appliedStyles?.map((s) => `${s.id}:${s.level}`).join(",") ?? null;
-              estimatedTokens = estimateTokens(body?.messages ?? body?.input ?? []);
+              estimatedTokens = estimateTokens(body?.messages ?? body?.input ?? [], {
+                provider,
+                model: effectiveModel,
+              });
               log?.debug?.("COMPRESSION", "Output styles applied");
             } else if (
               outputStyleResult.skippedReason &&
@@ -1817,6 +1822,7 @@ export async function handleChatCore({
   // hard boundary that prevents a too-large prompt (or a negative token budget)
   // from reaching an OpenAI-compatible upstream such as NVIDIA NIM.
   const estimateFinalInputTokens = (requestBody: Record<string, unknown> | null | undefined) => {
+    const meterContext: ContextMeterContext = { provider, model: effectiveModel };
     const adapted = requestBody
       ? adaptBodyForCompression(requestBody as Record<string, unknown>).body
       : null;
@@ -1830,10 +1836,10 @@ export async function handleChatCore({
           ? requestBody.input
           : []);
     return (
-      estimateTokens(messages) +
-      (Array.isArray(requestBody?.tools) ? estimateTokens(requestBody.tools) : 0) +
-      estimateTokens(requestBody?.system) +
-      estimateTokens(requestBody?.instructions)
+      estimateTokens(messages, meterContext) +
+      (Array.isArray(requestBody?.tools) ? estimateTokens(requestBody.tools, meterContext) : 0) +
+      estimateTokens(requestBody?.system, meterContext) +
+      estimateTokens(requestBody?.instructions, meterContext)
     );
   };
 
@@ -1843,12 +1849,16 @@ export async function handleChatCore({
   // getTokenLimit(provider, effectiveModel) re-fetch, which would silently
   // discard that combo-aware override and re-widen the last-resort budget.
   const finalContextLimit = contextLimit;
-  const toolsReserve = Array.isArray(body?.tools) ? estimateTokens(body.tools) : 0;
+  const finalMeterContext: ContextMeterContext = { provider, model: effectiveModel };
+  const toolsReserve = Array.isArray(body?.tools)
+    ? estimateTokens(body.tools, finalMeterContext)
+    : 0;
+  const contextGateLimit = finalContextGateLimit(finalContextLimit);
 
   // Last-resort compaction against the concrete input budget (not the 70% threshold).
   // Covers cases where the proactive pass was skipped or still left the request oversized (#8560).
-  if (finalEstimatedInputTokens >= finalContextLimit && body) {
-    const lastResortTarget = Math.max(1, finalContextLimit - toolsReserve - 1);
+  if (finalEstimatedInputTokens > contextGateLimit && body) {
+    const lastResortTarget = Math.max(1, contextGateLimit - toolsReserve - 1);
     const lastResortAdapter = adaptBodyForCompression(body as Record<string, unknown>);
     const lastResortResult = compressContext(lastResortAdapter.body, {
       provider,
@@ -1869,6 +1879,28 @@ export async function handleChatCore({
           `(re-estimated input ${finalEstimatedInputTokens}, limit ${finalContextLimit})`
       );
     }
+  }
+
+  // Final safety gate (#OMN-18): after every compression layer and with tool
+  // schemas/system/instructions accounted for, refuse to forward a request
+  // still above 0.90 x the resolved model context limit. The chars/4 legacy
+  // meter undercounts tool-heavy agent payloads ~1.6x, which let requests
+  // through that the upstream provider then rejected with a hard 400.
+  if (finalEstimatedInputTokens > contextGateLimit) {
+    const message =
+      `Input exceeds the safe context budget for ${provider}/${effectiveModel}: ` +
+      `estimated ${finalEstimatedInputTokens} tokens > gate ${contextGateLimit} ` +
+      `(0.90 x limit ${finalContextLimit}). The prompt is too long for this model ` +
+      "after compression; reduce the history or route to a larger-context model.";
+    log?.warn?.("CONTEXT", message);
+    trackPendingRequest(model, provider, connectionId, false);
+    return createErrorResult(
+      HTTP_STATUS.BAD_REQUEST,
+      message,
+      null,
+      "context_length_exceeded",
+      "invalid_request_error"
+    );
   }
 
   // Key the lookup by { provider, model } — the bare-string form resolves to

@@ -17,6 +17,11 @@ const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-token-est
 const ORIGINAL_DATA_DIR = process.env.DATA_DIR;
 process.env.DATA_DIR = TEST_DATA_DIR;
 
+// Pin the legacy meter: these tests assert exact chars/4 token values for the
+// image/passthrough logic they cover; the calibrated ratio is tested in
+// tests/unit/context-meter.test.ts.
+process.env.CONTEXT_METER_MODE = "legacy";
+
 const { estimateTokens } = await import("../../open-sse/services/contextManager.ts");
 const core = await import("../../src/lib/db/core.ts");
 

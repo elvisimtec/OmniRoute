@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { estimateTokens, getTokenLimit } from "../../open-sse/services/contextManager.ts";
 
+// Pin the legacy meter: these tests assert exact chars/4 token values for the
+// image/passthrough logic they cover; the calibrated ratio is tested in
+// tests/unit/context-meter.test.ts.
+process.env.CONTEXT_METER_MODE = "legacy";
+
 function makeFakePngBase64(approxBytes: number): string {
   return Buffer.alloc(approxBytes, 65).toString("base64");
 }
@@ -81,7 +86,10 @@ test("#8368: Gemini inlineData image block shape is bounded", () => {
 test("#8368: multiple images accumulate a bounded sum, not one flat cap", () => {
   const base64 = makeFakePngBase64(200_000);
   const oneImageMessages = [
-    { role: "user", content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${base64}` } }] },
+    {
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: `data:image/png;base64,${base64}` } }],
+    },
   ];
   const threeImageMessages = [
     {
@@ -109,7 +117,10 @@ test("#8368: remote http(s) image URLs are unaffected (still measured as text)",
   const estimated = estimateTokens(messages);
   // Should just be the JSON-length/4 heuristic for the short URL string, not near-zero
   // and not a bounded image-token substitute — remote URLs stay on the text path.
-  assert.ok(estimated > 0 && estimated < 100, `expected small text-based estimate, got ${estimated}`);
+  assert.ok(
+    estimated > 0 && estimated < 100,
+    `expected small text-based estimate, got ${estimated}`
+  );
 });
 
 test("#8368: generic long base64 text (not an image field) still uses the text path", () => {

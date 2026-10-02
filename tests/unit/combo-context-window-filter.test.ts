@@ -13,6 +13,11 @@ const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-combo-con
 const ORIGINAL_DATA_DIR = process.env.DATA_DIR;
 process.env.DATA_DIR = TEST_DATA_DIR;
 
+// Pin the legacy meter: these tests assert exact chars/4 token values for the
+// image/passthrough logic they cover; the calibrated ratio is tested in
+// tests/unit/context-meter.test.ts.
+process.env.CONTEXT_METER_MODE = "legacy";
+
 const core = await import("../../src/lib/db/core.ts");
 const { saveModelsDevCapabilities, clearModelsDevCapabilities } =
   await import("../../src/lib/modelsDevSync.ts");
@@ -57,7 +62,11 @@ function capabilityEntry(limitContext: number | null) {
   };
 }
 
-function capabilityEntryWithLimits(limitInput: number | null, limitContext: number | null, limitOutput = 4096) {
+function capabilityEntryWithLimits(
+  limitInput: number | null,
+  limitContext: number | null,
+  limitOutput = 4096
+) {
   return {
     ...capabilityEntry(limitContext),
     limit_input: limitInput,
@@ -387,10 +396,10 @@ test("model_context_override lets a small-catalog target survive a large-context
       largeContextBody(),
       noopLog
     );
-    assert.deepEqual(
-      out.map((entry) => entry.modelStr).sort(),
-      ["unit-override/big", "unit-override/capped"]
-    );
+    assert.deepEqual(out.map((entry) => entry.modelStr).sort(), [
+      "unit-override/big",
+      "unit-override/capped",
+    ]);
   } finally {
     removeModelContextOverride("unit-override", "capped");
   }
