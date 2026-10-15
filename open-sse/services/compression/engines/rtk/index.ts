@@ -130,8 +130,7 @@ function mergeRtkConfig(base?: Partial<RtkConfig>, override?: Record<string, unk
         ? Math.max(1, Math.floor(merged.rawOutputMaxFiles))
         : DEFAULT_RTK_CONFIG.rawOutputMaxFiles,
     rawOutputMaxAgeDays:
-      typeof merged.rawOutputMaxAgeDays === "number" &&
-      Number.isFinite(merged.rawOutputMaxAgeDays)
+      typeof merged.rawOutputMaxAgeDays === "number" && Number.isFinite(merged.rawOutputMaxAgeDays)
         ? Math.max(1, Math.floor(merged.rawOutputMaxAgeDays))
         : DEFAULT_RTK_CONFIG.rawOutputMaxAgeDays,
   };
@@ -225,6 +224,28 @@ function processRtkCodeBlocksOnly(
   };
 }
 
+const GENERIC_ERROR_MARKER_RE = /Error:|Exception:/;
+const PYTHON_EXCEPT_CLAUSE_RE = /^\s*(?:\d+\t)?\s*except\b/;
+const STACK_FRAME_RE = /^\s+at\s+\S/;
+const ERROR_LINE_SHARE_THRESHOLD = 0.2;
+
+function looksLikeErrorOutput(text: string): boolean {
+  if (/Traceback \(most recent call last\):/.test(text)) return true;
+  let nonEmptyLines = 0;
+  let errorLines = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    nonEmptyLines++;
+    if (
+      STACK_FRAME_RE.test(line) ||
+      (GENERIC_ERROR_MARKER_RE.test(line) && !PYTHON_EXCEPT_CLAUSE_RE.test(line))
+    ) {
+      errorLines++;
+    }
+  }
+  return errorLines > 0 && errorLines / nonEmptyLines >= ERROR_LINE_SHARE_THRESHOLD;
+}
+
 export function processRtkText(
   text: string,
   options: { command?: string | null; config?: Partial<RtkConfig>; skipFilters?: boolean } = {}
@@ -245,11 +266,15 @@ export function processRtkText(
   // generic-output filter keys on — then skip the truncating fallbacks. Genuine logs
   // detect as a known command type (or carry a command / error markers), so RTK's
   // value on those is preserved.
-  const hasGenericErrorMarkers = /Error:|Exception:|Traceback \(most recent call last\):/.test(
-    text
-  );
+  // OMN-32: a source-file read routinely contains those markers as code
+  // (`except ValueError:`, `logger.error(f"Error: {e}")`, docstring `Raises:` entries), so
+  // one stray match must not reclassify a whole file as error output — that fed a 3k-line
+  // Python file through the generic-output filter, which drops its blank lines and its
+  // middle. Count the markers as error output only when they dominate the text.
   const isDocumentLikeRead =
-    detection.type === "unknown" && !detection.command && !hasGenericErrorMarkers;
+    !detection.command &&
+    (detection.type === "unknown" || detection.type === "generic-error") &&
+    !looksLikeErrorOutput(text);
   let matchedFilterPatterns: string[] = [];
   if (!options.skipFilters && !isDocumentLikeRead) {
     const filter = matchRtkFilter(text, detection.command, {
@@ -260,7 +285,10 @@ export function processRtkText(
       if (config.enabledFilters.length === 0 || config.enabledFilters.includes(filter.id)) {
         const filtered = applyLineFilter(result, {
           ...filter,
-          maxLines: effectiveMaxLines(filter.maxLines || config.maxLinesPerResult, config.intensity),
+          maxLines: effectiveMaxLines(
+            filter.maxLines || config.maxLinesPerResult,
+            config.intensity
+          ),
         });
         result = filtered.text;
         if (filtered.appliedRules.length > 0) {
